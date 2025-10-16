@@ -33,14 +33,14 @@ def area_personale(user, db):
             sidebar_items = [
                 ("🏠 Area Personale", "area_personale"),
                 ("🧍‍♂️ Visualizza Pazienti", "show_pazienti"),
-                ("💬 Chatbot", "chatbot")
+                ("💬 Chatbot", "ask_chatbot")
             ]
         elif user.role == "Paziente":
             # --- Tutti i bottoni della sidebar uguali nello stile ---
             sidebar_items = [
                 ("🏠 Area Personale", "area_personale"),
                 ("🧍‍♂️ Visualizza Documenti", "show_docs"),
-                ("💬 Chatbot", "chatbot")
+                ("💬 Chatbot", "ask_chatbot")
             ]
 
         for label, page in sidebar_items:

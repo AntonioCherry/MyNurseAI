@@ -1,11 +1,14 @@
 import streamlit as st
-import time
-import io
-import os
-from PyPDF2 import PdfReader
+import time, os
 from app.models.doc import Doc
 
 def show_docs(db, user):
+    # Percorso del file CSS
+    css_path = os.path.join("app", "page_styles", "sidebar.css")
+
+    # Carica il contenuto e applica lo stile
+    with open(css_path) as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
     # --- SIDEBAR ---
     with st.sidebar:
@@ -18,11 +21,21 @@ def show_docs(db, user):
 
         st.markdown('<div class="sidebar-sep"></div>', unsafe_allow_html=True)
 
-        sidebar_items = [
-            ("🏠 Area Personale", "area_personale"),
-            ("🧍‍♂️ Visualizza Documenti", "show_pazienti"),
-            ("💬 Chatbot", "chatbot")
-        ]
+        if user.role == "Medico":
+            # --- Tutti i bottoni della sidebar uguali nello stile ---
+            sidebar_items = [
+                ("🏠 Area Personale", "area_personale"),
+                ("🧍‍♂️ Visualizza Pazienti", "show_pazienti"),
+                ("💬 Chatbot", "ask_chatbot")
+            ]
+        elif user.role == "Paziente":
+            # --- Tutti i bottoni della sidebar uguali nello stile ---
+            sidebar_items = [
+                ("🏠 Area Personale", "area_personale"),
+                ("🧍‍♂️ Visualizza Documenti", "show_docs"),
+                ("💬 Chatbot", "ask_chatbot")
+            ]
+
         for label, page in sidebar_items:
             if st.button(label, key=f"btn_{page}", use_container_width=True):
                 st.session_state.current_page = page

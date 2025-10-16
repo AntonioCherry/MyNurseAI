@@ -27,11 +27,21 @@ def upload_docs(db, user):
 
         st.markdown('<div class="sidebar-sep"></div>', unsafe_allow_html=True)
 
-        sidebar_items = [
-            ("🏠 Area Personale", "area_personale"),
-            ("🧍‍♂️ Visualizza Pazienti", "show_pazienti"),
-            ("💬 Chatbot", "chatbot")
-        ]
+        if user.role == "Medico":
+            # --- Tutti i bottoni della sidebar uguali nello stile ---
+            sidebar_items = [
+                ("🏠 Area Personale", "area_personale"),
+                ("🧍‍♂️ Visualizza Pazienti", "show_pazienti"),
+                ("💬 Chatbot", "ask_chatbot")
+            ]
+        elif user.role == "Paziente":
+            # --- Tutti i bottoni della sidebar uguali nello stile ---
+            sidebar_items = [
+                ("🏠 Area Personale", "area_personale"),
+                ("🧍‍♂️ Visualizza Documenti", "show_docs"),
+                ("💬 Chatbot", "ask_chatbot")
+            ]
+
         for label, page in sidebar_items:
             if st.button(label, key=f"btn_{page}", use_container_width=True):
                 st.session_state.current_page = page
