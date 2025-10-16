@@ -1,64 +1,15 @@
 import streamlit as st
 from app.models.user import User
 import time
+import os
 
 def show_pazienti(db, user):
-    # --- STILE PERSONALIZZATO ---
-    st.markdown("""
-        <style>
-        [data-testid="stSidebar"] {
-            background-color: #ffffff;
-            color: #333;
-            font-family: 'Arial', sans-serif;
-            padding-top: 20px;
-            border-right: 2px solid #ddd;
-        }
-        .sidebar-link {
-            display: block;
-            width: 100%;
-            padding: 12px 16px;
-            border-radius: 8px;
-            text-decoration: none !important;
-            color: #333 !important;
-            background-color: transparent;
-            transition: background-color 0.2s ease-in-out;
-            font-weight: 500;
-            cursor: pointer;
-            text-align: center;
-            margin-bottom: 5px;
-        }
-        .sidebar-link:hover {
-            background-color: #f0f0f0;
-        }
-        .sidebar-sep {
-            margin: 12px 0;
-            border-bottom: 1px solid #ddd;
-        }
-        .logout-btn {
-            color: #ff4b4b;
-            font-weight: 600;
-            text-align: center;
-        }
-        .logout-btn:hover {
-            background-color: #ffe6e6;
-        }
-        .profile-container {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-        .profile-container img {
-            border-radius: 50%;
-            width: 100px;
-            height: 100px;
-            object-fit: cover;
-            margin-bottom: 10px;
-        }
-        .profile-container h3 {
-            margin: 0;
-            font-size: 18px;
-        }
-        </style>
-    """, unsafe_allow_html=True)
+    # Percorso del file CSS
+    css_path = os.path.join("app", "page_styles", "sidebar.css")
+
+    # Carica il contenuto e applica lo stile
+    with open(css_path) as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
     # --- SIDEBAR ---
     with st.sidebar:
@@ -113,7 +64,7 @@ def show_pazienti(db, user):
             st.button(f"👤 {p.nome} {p.cognome} — {p.email}", key=f"btn_{p.email}", use_container_width=True)
         with col2:
             if st.button("📤", key=f"upload_{p.email}", help="Vai ai documenti del paziente"):
-                st.session_state.current_page = "show_docs"
+                st.session_state.current_page = "upload_docs"
                 st.session_state.selected_paziente = p
                 st.rerun()
 

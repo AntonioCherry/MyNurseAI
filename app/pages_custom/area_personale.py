@@ -1,7 +1,7 @@
 import streamlit as st
 import time
-from app.pages_custom.show_pazienti import show_pazienti  # ✅ import della funzione
-from app.models.user import User
+import os
+from app.pages_custom.show_pazienti import show_pazienti
 
 
 def area_personale(user, db):
@@ -10,62 +10,12 @@ def area_personale(user, db):
         st.warning("⚠️ Devi prima effettuare il login.")
         st.stop()
 
-    # --- STILE PERSONALIZZATO ---
-    st.markdown("""
-    <style>
-    [data-testid="stSidebar"] {
-        background-color: #ffffff;
-        color: #333;
-        font-family: 'Arial', sans-serif;
-        padding-top: 20px;
-        border-right: 2px solid #ddd;
-    }
-    .sidebar-link {
-        display: block;
-        width: 100%;
-        padding: 12px 16px;
-        border-radius: 8px;
-        text-decoration: none !important;
-        color: #333 !important;
-        background-color: transparent;
-        transition: background-color 0.2s ease-in-out;
-        font-weight: 500;
-        cursor: pointer;
-        text-align: center;
-        margin-bottom: 5px;
-    }
-    .sidebar-link:hover {
-        background-color: #f0f0f0;
-    }
-    .sidebar-sep {
-        margin: 12px 0;
-        border-bottom: 1px solid #ddd;
-    }
-    .logout-btn {
-        color: #ff4b4b;
-        font-weight: 600;
-        text-align: center;
-    }
-    .logout-btn:hover {
-        background-color: #ffe6e6;
-    }
-    .profile-container {
-        text-align: center;
-        margin-bottom: 20px;
-    }
-    .profile-container img {
-        border-radius: 50%;
-        width: 100px;
-        height: 100px;
-        object-fit: cover;
-        margin-bottom: 10px;
-    }
-    .profile-container h3 {
-        margin: 0;
-        font-size: 18px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+     # Percorso del file CSS
+    css_path = os.path.join("app", "page_styles", "sidebar.css")
+
+    # Carica il contenuto e applica lo stile
+    with open(css_path) as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
     # --- SIDEBAR ---
     with st.sidebar:
@@ -78,12 +28,20 @@ def area_personale(user, db):
 
         st.markdown('<div class="sidebar-sep"></div>', unsafe_allow_html=True)
 
-        # --- Tutti i bottoni della sidebar uguali nello stile ---
-        sidebar_items = [
-            ("🏠 Area Personale", "area_personale"),
-            ("🧍‍♂️ Visualizza Pazienti", "show_pazienti"),
-            ("💬 Chatbot", "chatbot")
-        ]
+        if user.role == "Medico":
+            # --- Tutti i bottoni della sidebar uguali nello stile ---
+            sidebar_items = [
+                ("🏠 Area Personale", "area_personale"),
+                ("🧍‍♂️ Visualizza Pazienti", "show_pazienti"),
+                ("💬 Chatbot", "chatbot")
+            ]
+        elif user.role == "Paziente":
+            # --- Tutti i bottoni della sidebar uguali nello stile ---
+            sidebar_items = [
+                ("🏠 Area Personale", "area_personale"),
+                ("🧍‍♂️ Visualizza Documenti", "show_docs"),
+                ("💬 Chatbot", "chatbot")
+            ]
 
         for label, page in sidebar_items:
             if st.button(label, key=f"btn_{page}", use_container_width=True):
