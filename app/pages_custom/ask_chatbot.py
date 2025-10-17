@@ -1,31 +1,25 @@
 import streamlit as st
-import os, torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+import os
+from ollama import chat, ChatResponse
 
-
+# --- Funzione per caricare il "modello" tramite Ollama ---
 @st.cache_resource
 def load_model():
-    model_name = "tiiuae/falcon-3b-instruct"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    return OllamaWrapper(model_name="qwen3:1.7b")
 
-    # Controllo se bitsandbytes è disponibile per il caricamento in 4-bit
-    try:
-        import bitsandbytes
-        use_4bit = True
-    except ImportError:
-        print("⚠️ bitsandbytes non trovato, il modello verrà caricato in FP16 (senza 4-bit).")
-        use_4bit = False
+class OllamaWrapper:
+    def __init__(self, model_name):
+        self.model_name = model_name
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map="auto" if torch.cuda.is_available() else None,
-        load_in_4bit=use_4bit,  # solo se bitsandbytes è installato
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True
-    )
+    def __call__(self, prompt):
+        response: ChatResponse = chat(
+            model=self.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            stream=False
+        )
+        return [{"generated_text": response.message.content}]
 
-    return pipeline("text-generation", model=model, tokenizer=tokenizer, max_new_tokens=256)
-
+# --- Funzione principale della chat ---
 def ask_chatbot(user):
     # --- CSS sidebar ---
     css_path = os.path.join("app", "page_styles", "sidebar.css")
@@ -73,7 +67,7 @@ def ask_chatbot(user):
     # --- Titolo Chatbot ---
     st.title("💬 Chat con il tuo infermiere virtuale")
 
-    # --- Carica modello ---
+    # --- Carica modello tramite Ollama ---
     chatbot = load_model()
 
     # --- Memoria chat ---
@@ -91,7 +85,8 @@ def ask_chatbot(user):
     if "chat_input" not in st.session_state:
         st.session_state.chat_input = ""
 
-    user_input = st.text_input("Scrivi la tua domanda:", key="chat_input")
+    user_input = st.text_input("Scrivi la tua domanda:", value="", key="chat_input")
+
     if st.button("💬 Invia"):
         if user_input.strip():
             st.session_state.chat_history.append(("user", user_input))
@@ -100,7 +95,9 @@ def ask_chatbot(user):
                 response = chatbot(user_input)[0]["generated_text"]
 
             st.session_state.chat_history.append(("bot", response))
-            st.session_state.chat_input = ""  # reset input
+
+            # Non serve resettare chat_input manualmente
             st.rerun()
         else:
             st.warning("⚠️ Inserisci un messaggio prima di inviare.")
+
