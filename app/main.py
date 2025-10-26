@@ -48,7 +48,7 @@ if st.session_state.logged_in and st.session_state.user is not None:
     elif st.session_state.current_page == "show_docs":
         show_docs(db,user)
     elif st.session_state.current_page == "ask_chatbot":
-        ask_chatbot(user)
+        ask_chatbot(db,user)
     else:
         # Se current_page contiene un valore non valido, torna all'area personale
         st.session_state.current_page = "area_personale"
