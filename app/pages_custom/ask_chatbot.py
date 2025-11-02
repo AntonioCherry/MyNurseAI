@@ -1,9 +1,10 @@
 import streamlit as st
-import os, difflib, time
+import os, difflib
 from ollama import chat, ChatResponse
 from langchain.vectorstores import Chroma
 from langchain.embeddings import HuggingFaceEmbeddings
 from sqlalchemy.orm import Session
+from app.components.sidebar import sidebar
 from app.models.user import User
 
 # --- Wrapper Ollama ---
@@ -43,23 +44,52 @@ def get_pazienti_del_medico(email_medico: str, db: Session):
     return db.query(User).filter(User.medicoAssociato == email_medico).all()
 
 
-def build_rag_prompt(query, retrieved_docs, paziente_nome=None):
-    context = "\n\n".join(retrieved_docs)
+def build_rag_prompt(query, retrieved_docs, paziente_nome=None, contains_therapy: bool = False):
+    """
+    Costruisce il prompt RAG.
+    - query: testo della domanda
+    - retrieved_docs: lista di stringhe recuperate dal retriever
+    - paziente_nome: (opzionale) nome del paziente per contesto
+    - contains_therapy: True se il contesto contiene informazioni terapeutiche
+    """
+    context = "\n\n".join(retrieved_docs) if retrieved_docs else "(Nessun documento rilevante trovato.)"
     patient_info = f"\nIl paziente in questione è {paziente_nome}." if paziente_nome else ""
-    prompt = f"""
-Sei un infermiere virtuale che assiste un medico.
-Analizza i documenti clinici disponibili e rispondi in linguaggio chiaro e professionale.{patient_info}
 
-Contesto:
+    # Istruzione specifica riguardo la terapia: vincola il modello a non inventare terapie
+    if contains_therapy:
+        therapy_instruction = (
+            "Nei documenti forniti ci sono informazioni su terapie o trattamenti. "
+            "Se rispondi citando una terapia, riporta esclusivamente quanto presente nei documenti "
+            "e indica chiaramente la fonte o il referto da cui proviene l'informazione."
+        )
+    else:
+        therapy_instruction = (
+            "ATTENZIONE: nei documenti forniti non risultano informazioni su terapie o farmaci. "
+            "Non proporre né inventare terapie, farmaci, dosaggi o prescrizioni. "
+            "Limita la risposta a informazioni diagnostiche, descrittive o di follow-up presenti nel contesto."
+        )
+
+    prompt = f"""
+Sei un infermiere virtuale che assiste un medico. Rispondi in modo chiaro, professionale e conservativo.
+{patient_info}
+
+{therapy_instruction}
+
+Contesto (da usare esclusivamente per rispondere; non aggiungere informazioni esterne):
 {context}
 
-Domanda del medico:
+Domanda del medico/paziente:
 {query}
+
+Istruzioni di formato:
+- Rispondi solo con informazioni presenti nel contesto.
+- Se non trovi informazioni pertinenti, rispondi esplicitando che nei documenti non sono presenti dati utili.
+- Non includere consigli farmacologici o terapie se non esplicitamente presenti nei documenti.
+- Se citi parti dei documenti, indica brevemente la loro fonte (es. "Da referto del DD/MM/YYYY").
 
 Risposta:
 """
     return prompt
-
 
 def identify_paziente_in_query(query, pazienti):
     """
@@ -82,51 +112,7 @@ def identify_paziente_in_query(query, pazienti):
 
 
 def ask_chatbot(db,user):
-    css_path = os.path.join("app", "page_styles", "sidebar.css")
-    if os.path.exists(css_path):
-        with open(css_path) as f:
-            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-
-        # --- SIDEBAR ---
-        with st.sidebar:
-            st.markdown(f"""
-                <div class="profile-container">
-                    <img src="https://cdn-icons-png.flaticon.com/512/847/847969.png" alt="Profilo">
-                    <h3>👋 Ciao, {user.nome}!</h3>
-                </div>
-            """, unsafe_allow_html=True)
-
-            st.markdown('<div class="sidebar-sep"></div>', unsafe_allow_html=True)
-
-            if user.role == "Medico":
-                # --- Tutti i bottoni della sidebar uguali nello stile ---
-                sidebar_items = [
-                    ("🏠 Area Personale", "area_personale"),
-                    ("🧍‍♂️ Visualizza Pazienti", "show_pazienti"),
-                    ("💬 Chatbot", "ask_chatbot")
-                ]
-            elif user.role == "Paziente":
-                # --- Tutti i bottoni della sidebar uguali nello stile ---
-                sidebar_items = [
-                    ("🏠 Area Personale", "area_personale"),
-                    ("🧍‍♂️ Visualizza Documenti", "show_docs"),
-                    ("💬 Chatbot", "ask_chatbot")
-                ]
-
-            for label, page in sidebar_items:
-                if st.button(label, key=f"btn_{page}", use_container_width=True):
-                    st.session_state.current_page = page
-                    st.rerun()
-
-            st.markdown('<div class="sidebar-sep"></div>', unsafe_allow_html=True)
-            if st.button("🚪 Logout", use_container_width=True):
-                st.session_state.logged_in = False
-                st.session_state.user = None
-                st.session_state.show_register = False
-                st.query_params.clear()
-                st.success("Logout effettuato con successo!")
-                time.sleep(1)
-                st.rerun()
+    sidebar(user)
 
     st.title("💬 Chat con il tuo infermiere virtuale")
 
@@ -158,6 +144,8 @@ def ask_chatbot(db,user):
         st.session_state.chat_history.append(("user", user_input))
 
         with st.spinner("L'infermiere sta cercando nei documenti..."):
+            response = None
+
             # --- Se medico ---
             if user.role == "Medico":
                 selected_paziente = identify_paziente_in_query(user_input, pazienti)
@@ -179,12 +167,32 @@ def ask_chatbot(db,user):
                         retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
                         docs = retriever.get_relevant_documents(user_input)
                         retrieved_texts = [d.page_content for d in docs]
+                        context = "\n\n".join(retrieved_texts)
+
+                        # --- Controllo terapeutico ---
+                        keywords_therapy = [
+                            "terapia", "trattamento", "cura", "farmaco",
+                            "posologia", "assumere", "prescrizione",
+                            "somministrazione", "protocollo terapeutico"
+                        ]
+                        contains_therapy = any(kw in context.lower() for kw in keywords_therapy)
+
                         rag_prompt = build_rag_prompt(
                             user_input,
                             retrieved_texts,
-                            paziente_nome=f"{selected_paziente.nome} {selected_paziente.cognome}"
+                            paziente_nome=f"{selected_paziente.nome} {selected_paziente.cognome}",
+                            contains_therapy= contains_therapy
                         )
+
                         response = chatbot(rag_prompt)[0]["generated_text"]
+
+                        # --- Controllo post-risposta ---
+                        therapy_words = ["assum", "farmaco", "terapia", "trattamento", "cura", "mg", "somministr"]
+                        if not contains_therapy and any(w in response.lower() for w in therapy_words):
+                            response = (
+                                "⚠️ Nei documenti consultati non sono presenti indicazioni terapeutiche. "
+                                "Riporto solo le informazioni cliniche disponibili relative al caso."
+                            )
 
             # --- Se paziente ---
             else:
@@ -193,9 +201,18 @@ def ask_chatbot(db,user):
                 if vectorstore is None:
                     response = "Non ho trovato informazioni nei tuoi documenti."
                 else:
-                    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+                    retriever = vectorstore.as_retriever(search_kwargs={"k": 1})
                     docs = retriever.get_relevant_documents(user_input)
                     retrieved_texts = [d.page_content for d in docs]
+                    context = "\n\n".join(retrieved_texts)
+
+                    # --- Controllo terapeutico anche per pazienti ---
+                    keywords_therapy = [
+                        "terapia", "trattamento", "cura", "farmaco",
+                        "posologia", "assumere", "prescrizione",
+                        "somministrazione", "protocollo terapeutico"
+                    ]
+                    contains_therapy = any(kw in context.lower() for kw in keywords_therapy)
 
                     if not retrieved_texts:
                         response = (
@@ -203,8 +220,20 @@ def ask_chatbot(db,user):
                             "per rispondere alla domanda."
                         )
                     else:
-                        rag_prompt = build_rag_prompt(user_input, retrieved_texts)
+                        rag_prompt = build_rag_prompt(
+                            user_input,
+                            retrieved_texts,
+                            contains_therapy=contains_therapy
+                        )
                         response = chatbot(rag_prompt)[0]["generated_text"]
+
+                        # --- Controllo post-risposta ---
+                        therapy_words = ["assum", "farmaco", "terapia", "trattamento", "cura", "mg", "somministr"]
+                        if not contains_therapy and any(w in response.lower() for w in therapy_words):
+                            response = (
+                                "⚠️ Nei documenti consultati non sono presenti indicazioni terapeutiche. "
+                                "Non posso fornirti indicazioni terapeutiche se non sono state prima indicate dal tuo medico curante!"
+                            )
 
         st.session_state.chat_history.append(("bot", response))
         st.rerun()
