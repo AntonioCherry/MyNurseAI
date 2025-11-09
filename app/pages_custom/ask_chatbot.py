@@ -6,8 +6,12 @@ from langchain.embeddings import HuggingFaceEmbeddings
 from sqlalchemy.orm import Session
 from app.components.sidebar import sidebar
 from app.models.user import User
+from app.security_components.check_therapy import is_therapy_related
+from app.security_components.PII_obfuscation import obscure_pii
+
 
 # --- Wrapper Ollama ---
+# --- Utilizzato per impacchettare le richieste indirizzate ad ollama ---
 class OllamaWrapper:
     def __init__(self, model_name):
         self.model_name = model_name
@@ -20,17 +24,21 @@ class OllamaWrapper:
         )
         return [{"generated_text": response.message.content}]
 
-
+# --- Caricamento dell'LLM ---
 @st.cache_resource
 def load_model():
-    return OllamaWrapper(model_name="qwen3:1.7b")
+    return OllamaWrapper(model_name="mistral")
 
-
+# --- Funzione che sulla base dell'email dell'utente reperisce tutte le info in formato vettoriale
+# --- dalla rispetiva cartella di chromaDB
 def load_vectorstore(email_paziente):
     persist_dir = os.path.join("chroma_db", email_paziente)
     if not os.path.exists(persist_dir):
         return None
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embeddings = HuggingFaceEmbeddings(
+        model_name="intfloat/multilingual-e5-large",
+        encode_kwargs={"normalize_embeddings": True}
+    )
     vectorstore = Chroma(
         persist_directory=persist_dir,
         embedding_function=embeddings,
@@ -39,7 +47,7 @@ def load_vectorstore(email_paziente):
     return vectorstore
 
 
-
+# --- Funzione che restituisce tutti i pazienti di un determinato medico ---
 def get_pazienti_del_medico(email_medico: str, db: Session):
     return db.query(User).filter(User.medicoAssociato == email_medico).all()
 
@@ -55,7 +63,8 @@ def build_rag_prompt(query, retrieved_docs, paziente_nome=None, contains_therapy
     context = "\n\n".join(retrieved_docs) if retrieved_docs else "(Nessun documento rilevante trovato.)"
     patient_info = f"\nIl paziente in questione è {paziente_nome}." if paziente_nome else ""
 
-    # Istruzione specifica riguardo la terapia: vincola il modello a non inventare terapie
+    # Istruzione specifica riguardo la terapia: vincola il modello a non inventare terapie,
+    # ma a rispondere solo sulla base delle terapie prescritte dal medico a cui quel paziente fa riferimento.
     if contains_therapy:
         therapy_instruction = (
             "Nei documenti forniti ci sono informazioni su terapie o trattamenti. "
@@ -122,7 +131,7 @@ def ask_chatbot(db,user):
     if user.role == "Medico":
         pazienti = get_pazienti_del_medico(user.email, db)
     else:
-        pazienti = [user]  # se paziente loggato
+        pazienti = [user]
 
     # Memoria chat
     if "chat_history" not in st.session_state:
@@ -148,14 +157,16 @@ def ask_chatbot(db,user):
 
             # --- Se medico ---
             if user.role == "Medico":
+                #1. Cerca di identificare il paziente nella query al chatbot.
                 selected_paziente = identify_paziente_in_query(user_input, pazienti)
-
+                #1.1. Se  non trova nessun riferimento a pazienti di quel medico allora restituisce errore.
                 if not selected_paziente:
                     response = (
                         "Non ho trovato riferimenti chiari a un paziente tra i tuoi assistiti. "
                         "Puoi ripetere la domanda specificando il nome completo del paziente?"
                     )
                 else:
+                    #2. Tramite l'email del paziente viene caricato il vector store di quel paziente specifico.
                     paziente_email = selected_paziente.email
                     vectorstore = load_vectorstore(paziente_email)
                     if vectorstore is None:
@@ -164,35 +175,39 @@ def ask_chatbot(db,user):
                             f"{selected_paziente.nome} {selected_paziente.cognome}."
                         )
                     else:
+                        #3. Vengono estratti dal vector store di quel paziente i k=3 documenti più pertinenti
+                        #   I documenti poi verranno utilizzati per costruire il contesto su cui si baserà
+                        #   il chatbot per generare una risposta.
                         retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
                         docs = retriever.get_relevant_documents(user_input)
                         retrieved_texts = [d.page_content for d in docs]
                         context = "\n\n".join(retrieved_texts)
 
                         # --- Controllo terapeutico ---
-                        keywords_therapy = [
-                            "terapia", "trattamento", "cura", "farmaco",
-                            "posologia", "assumere", "prescrizione",
-                            "somministrazione", "protocollo terapeutico"
-                        ]
-                        contains_therapy = any(kw in context.lower() for kw in keywords_therapy)
-
+                        contains_therapy = is_therapy_related(context)
+                        #4. Costruzione del prompt sulla base del contesto recuperato dal vector store.
                         rag_prompt = build_rag_prompt(
                             user_input,
                             retrieved_texts,
                             paziente_nome=f"{selected_paziente.nome} {selected_paziente.cognome}",
                             contains_therapy= contains_therapy
                         )
+                        #5. Chiamata al chatbot e restituzione risposta
+                        raw_response = chatbot(rag_prompt)[0]["generated_text"]
+                        response = obscure_pii(raw_response)
 
-                        response = chatbot(rag_prompt)[0]["generated_text"]
+                        #6. --- Controllo se l'input dell'utente riguarda una terapia ---
+                        query_is_therapy = is_therapy_related(user_input)
 
-                        # --- Controllo post-risposta ---
-                        therapy_words = ["assum", "farmaco", "terapia", "trattamento", "cura", "mg", "somministr"]
-                        if not contains_therapy and any(w in response.lower() for w in therapy_words):
+                        #7. Se nella query utente è presente un riferimento a terapie o farmaci e
+                        #   nel contesto recuperato non ci sono riferimenti a tali terapie e farmaci allora da errore
+                        if query_is_therapy and not contains_therapy:
                             response = (
                                 "⚠️ Nei documenti consultati non sono presenti indicazioni terapeutiche. "
-                                "Riporto solo le informazioni cliniche disponibili relative al caso."
+                                "Posso riportare solo informazioni cliniche generali relative al caso, "
+                                "ma non dettagli su trattamenti o farmaci."
                             )
+
 
             # --- Se paziente ---
             else:
@@ -201,18 +216,13 @@ def ask_chatbot(db,user):
                 if vectorstore is None:
                     response = "Non ho trovato informazioni nei tuoi documenti."
                 else:
-                    retriever = vectorstore.as_retriever(search_kwargs={"k": 1})
+                    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
                     docs = retriever.get_relevant_documents(user_input)
                     retrieved_texts = [d.page_content for d in docs]
                     context = "\n\n".join(retrieved_texts)
 
-                    # --- Controllo terapeutico anche per pazienti ---
-                    keywords_therapy = [
-                        "terapia", "trattamento", "cura", "farmaco",
-                        "posologia", "assumere", "prescrizione",
-                        "somministrazione", "protocollo terapeutico"
-                    ]
-                    contains_therapy = any(kw in context.lower() for kw in keywords_therapy)
+
+                    contains_therapy = is_therapy_related(context)
 
                     if not retrieved_texts:
                         response = (
@@ -227,12 +237,17 @@ def ask_chatbot(db,user):
                         )
                         response = chatbot(rag_prompt)[0]["generated_text"]
 
-                        # --- Controllo post-risposta ---
-                        therapy_words = ["assum", "farmaco", "terapia", "trattamento", "cura", "mg", "somministr"]
-                        if not contains_therapy and any(w in response.lower() for w in therapy_words):
+                        query_is_therapy = is_therapy_related(user_input)
+
+                        # --- Logica più intelligente: ---
+                        #  - Se la domanda riguarda una terapia
+                        #  - ma nei documenti non ci sono riferimenti terapeutici
+                        #  -> Mostra messaggio di avviso
+                        if query_is_therapy and not contains_therapy:
                             response = (
                                 "⚠️ Nei documenti consultati non sono presenti indicazioni terapeutiche. "
-                                "Non posso fornirti indicazioni terapeutiche se non sono state prima indicate dal tuo medico curante!"
+                                "Posso riportare solo informazioni cliniche generali relative al caso, "
+                                "ma non dettagli su trattamenti o farmaci."
                             )
 
         st.session_state.chat_history.append(("bot", response))

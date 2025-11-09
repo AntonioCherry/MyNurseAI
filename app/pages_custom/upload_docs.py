@@ -7,7 +7,7 @@ from app.models.doc import Doc
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.vectorstores import Chroma
 from langchain.embeddings import HuggingFaceEmbeddings
-from app.utils.pdf_validation import validate_pdf_content
+from app.security_components.doc_validation import validate_pdf_content
 
 def upload_docs(db, user):
     sidebar(user)
@@ -29,10 +29,18 @@ def upload_docs(db, user):
     os.makedirs(persist_dir, exist_ok=True)
 
     # --- Carica o crea vectorstore ---
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    vectorstore = Chroma(persist_directory=persist_dir, embedding_function=embeddings, collection_name="docs")
+    embeddings = HuggingFaceEmbeddings(
+        model_name="intfloat/multilingual-e5-large",
+        encode_kwargs={"normalize_embeddings": True}
+    )
 
-    # --- Upload PDF (sezione modificata) ---
+    vectorstore = Chroma(
+        persist_directory=persist_dir,
+        embedding_function=embeddings,
+        collection_name="docs"
+    )
+
+    # --- Upload PDF ---
     uploaded_file = st.file_uploader("Carica un nuovo documento", type=["pdf"])
     if uploaded_file is not None:
         processing_key = f"upload_processing_{p.email}"
@@ -49,8 +57,11 @@ def upload_docs(db, user):
             try:
                 file_bytes = uploaded_file.read()
 
-                # --- VALIDAZIONE PDF (usa la tua validate_pdf_content) ---
+                # --- VALIDAZIONE PDF ---
+
+
                 valid, message = validate_pdf_content(file_bytes)
+
                 if not valid:
                     st.error(f"❌ Upload rifiutato: {message}")
                     # rimuovi il lock e non impostare flag permanente

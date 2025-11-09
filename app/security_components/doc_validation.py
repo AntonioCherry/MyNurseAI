@@ -11,15 +11,25 @@ def classify_with_ollama(text: str) -> tuple[bool, str, float]:
     Restituisce (is_medical, label, confidence)
     """
     prompt = f"""
-Sei un classificatore testuale.
-Determina se il seguente testo appartiene al dominio medico-sanitario.
-Rispondi esclusivamente con una parola: "medico" o "non medico".
+    Sei un classificatore di documenti clinici.
+    Determina se il seguente testo è un **documento medico o sanitario** (es. referto, prescrizione, anamnesi, visita, diagnosi).
 
-Testo:
-{text[:2000]}
+    Classifica come:
+    - "MEDICO" se contiene dati clinici, sintomi, diagnosi, terapie, esami o indicazioni sanitarie.
+    - "NON_MEDICO" se è un testo amministrativo, tecnico, o non sanitario.
+
+    Esempi:
+    1. "Referto clinico — visita cardiologica con ECG e prescrizione." → MEDICO
+    2. "Modulo di consenso informato." → MEDICO
+    3. "Curriculum del medico o documento legale." → NON_MEDICO
+    4. "Articolo informativo sulla salute." → NON_MEDICO
+
+    Testo:
+    {text[:2000]}
     """
 
     try:
+        # ✅ Specifica il modello
         result = subprocess.run(
             ["ollama", "run", "mistral"],
             input=prompt.encode("utf-8"),
@@ -30,18 +40,31 @@ Testo:
         if result.returncode != 0:
             raise RuntimeError(result.stderr.decode())
 
-        raw_output = result.stdout.decode().strip().lower()
+        raw_output = result.stdout.decode().strip()
+
+        # 🪶 DEBUG: stampa output grezzo e interpretazione
+        print("\n--- DEBUG CLASSIFICATORE ---")
+        print("Output grezzo da Ollama:")
+        print(raw_output)
+        print("-----------------------------")
+
+        low = raw_output.lower()
 
         # Analizza risposta
-        if "medico" in raw_output and "non" not in raw_output:
+        if "medico" in low and not re.search(r"\bnon[- ]?medico\b", low):
+            print("→ Classificato come: MEDICO ✅")
             return True, "medico", 0.9
-        elif "non medico" in raw_output or "non-medico" in raw_output:
+        elif re.search(r"\bnon[- ]?medico\b", low):
+            print("→ Classificato come: NON_MEDICO ❌")
             return False, "non medico", 0.9
         else:
+            print("→ Classificazione incerta ⚠️:", raw_output)
             return False, raw_output, 0.5
 
     except Exception as e:
+        print("⚠️ Errore nel classificatore:", e)
         return False, f"Errore Ollama: {e}", 0.0
+
 
 
 def shannon_entropy(s: str) -> float:
@@ -68,7 +91,6 @@ def check_pdf_structure(pdf_bytes: bytes) -> tuple[bool, str]:
 def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
     """
     Analizza il contenuto del PDF per individuare testo sospetto o codificato.
-    Migliorata per ridurre falsi positivi su documenti medici.
     """
     def alpha_ratio(s: str) -> float:
         """Percentuale di lettere in una stringa."""
@@ -79,9 +101,9 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
 
     errors = []
     suspicion_score = 0.0
-    SCORE_THRESHOLD = 2.2  # soglia più alta per ridurre falsi positivi
+    SCORE_THRESHOLD = 2.2
 
-    # --- estrai testo grezzo ---
+    # --- estrazione testo grezzo ---
     reader = PdfReader(io.BytesIO(pdf_bytes))
     pages_texts = [page.extract_text() or "" for page in reader.pages]
     text = "\n".join(pages_texts)
@@ -103,7 +125,7 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
     compact_lower = compact.lower()
     alnum = re.sub(r"[^A-Za-z0-9+/=]", "", text)
 
-    # --- rilevamento Base64 (più restrittivo) ---
+    # --- rilevamento Base64 ---
     base64_matches = list(re.finditer(r"(?:[A-Za-z0-9+/]{80,}={0,2})", alnum))
     base64_flag = False
     for m in base64_matches:
@@ -128,7 +150,7 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
         errors.append("Entropia elevata: possibile testo codificato o anomalo.")
         suspicion_score += 1.0
 
-    # --- rilevamento linee di codice (versione migliorata) ---
+    # --- rilevamento linee di codice ---
     code_like_lines = 0
     for line in text.splitlines():
         line_stripped = line.strip()
@@ -154,7 +176,7 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
         if symbol_count >= 3 or keyword_hits >= 1:
             code_like_lines += 1
 
-    # aumenta la soglia per ridurre falsi positivi (ora serve molto codice per triggerare)
+    # aumenta la soglia per ridurre falsi positivi
     if code_like_lines > 15:
         errors.append(f"Rilevate {code_like_lines} righe con pattern simili a codice.")
         suspicion_score += 0.5
@@ -182,16 +204,16 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
     if suspicion_score < 1.6:
         valid, label, conf = classify_with_ollama(text)
         if not valid:
-            errors.append("Il documento non appare medico (classificazione LLM).")
+            errors.append("Il documento non appare medico.")
             suspicion_score += 0.6
     else:
         try:
             valid, label, conf = classify_with_ollama(text)
             if not valid:
-                errors.append("Il documento non appare medico (classificazione LLM).")
+                errors.append("Il documento non appare medico.")
                 suspicion_score += 0.4
         except Exception:
-            errors.append("Errore durante la classification LLM (verificare log).")
+            errors.append("Errore durante la classification LLM.")
 
     # --- decisione finale ---
     if suspicion_score >= SCORE_THRESHOLD or errors:
