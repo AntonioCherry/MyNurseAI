@@ -8,6 +8,8 @@ from app.components.sidebar import sidebar
 from app.models.user import User
 from app.security_components.check_therapy import is_therapy_related
 from app.security_components.PII_obfuscation import obscure_pii
+from app.security_components.prompt_sanitizer import sanitize_user_prompt
+from app.security_components.verify_hallucination import verify_response_with_llm
 
 
 # --- Wrapper Ollama ---
@@ -23,6 +25,9 @@ class OllamaWrapper:
             stream=False
         )
         return [{"generated_text": response.message.content}]
+
+    def reset(self):
+        pass
 
 # --- Caricamento dell'LLM ---
 @st.cache_resource
@@ -126,6 +131,7 @@ def ask_chatbot(db,user):
     st.title("💬 Chat con il tuo infermiere virtuale")
 
     chatbot = load_model()
+    hallucination_checker = load_model()
 
     # Se medico, carica tutti i suoi pazienti
     if user.role == "Medico":
@@ -147,10 +153,16 @@ def ask_chatbot(db,user):
 
     if st.button("💬 Invia"):
         if not user_input.strip():
-            st.warning("⚠️ Inserisci un messaggio prima di inviare.")
+            st.warning("Inserisci un messaggio prima di inviare.")
             return
 
-        st.session_state.chat_history.append(("user", user_input))
+        processed_input = obscure_pii(user_input)
+        sanitized_input = sanitize_user_prompt(processed_input)
+
+        if sanitized_input is "error":
+            st.warning("⚠️ Il messaggio contiene istruzioni non consentite o sospette. Riformula la domanda.")
+            return
+        st.session_state.chat_history.append(("user", processed_input))
 
         with st.spinner("L'infermiere sta cercando nei documenti..."):
             response = None
@@ -158,7 +170,7 @@ def ask_chatbot(db,user):
             # --- Se medico ---
             if user.role == "Medico":
                 #1. Cerca di identificare il paziente nella query al chatbot.
-                selected_paziente = identify_paziente_in_query(user_input, pazienti)
+                selected_paziente = identify_paziente_in_query(sanitized_input, pazienti)
                 #1.1. Se  non trova nessun riferimento a pazienti di quel medico allora restituisce errore.
                 if not selected_paziente:
                     response = (
@@ -179,7 +191,7 @@ def ask_chatbot(db,user):
                         #   I documenti poi verranno utilizzati per costruire il contesto su cui si baserà
                         #   il chatbot per generare una risposta.
                         retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-                        docs = retriever.get_relevant_documents(user_input)
+                        docs = retriever.get_relevant_documents(sanitized_input)
                         retrieved_texts = [d.page_content for d in docs]
                         context = "\n\n".join(retrieved_texts)
 
@@ -187,17 +199,22 @@ def ask_chatbot(db,user):
                         contains_therapy = is_therapy_related(context)
                         #4. Costruzione del prompt sulla base del contesto recuperato dal vector store.
                         rag_prompt = build_rag_prompt(
-                            user_input,
+                            processed_input,
                             retrieved_texts,
                             paziente_nome=f"{selected_paziente.nome} {selected_paziente.cognome}",
                             contains_therapy= contains_therapy
                         )
-                        #5. Chiamata al chatbot e restituzione risposta
-                        raw_response = chatbot(rag_prompt)[0]["generated_text"]
-                        response = obscure_pii(raw_response)
 
+
+
+
+                        response = "Il cane è il miglior amico dell'uomo"
+                        is_supported, verification_feedback = verify_response_with_llm(response, retrieved_texts,
+                                                                                    hallucination_checker)
+                        if not is_supported:
+                            st.warning("ciao")
                         #6. --- Controllo se l'input dell'utente riguarda una terapia ---
-                        query_is_therapy = is_therapy_related(user_input)
+                        query_is_therapy = is_therapy_related(sanitized_input)
 
                         #7. Se nella query utente è presente un riferimento a terapie o farmaci e
                         #   nel contesto recuperato non ci sono riferimenti a tali terapie e farmaci allora da errore
@@ -217,7 +234,7 @@ def ask_chatbot(db,user):
                     response = "Non ho trovato informazioni nei tuoi documenti."
                 else:
                     retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-                    docs = retriever.get_relevant_documents(user_input)
+                    docs = retriever.get_relevant_documents(processed_input)
                     retrieved_texts = [d.page_content for d in docs]
                     context = "\n\n".join(retrieved_texts)
 
@@ -231,13 +248,14 @@ def ask_chatbot(db,user):
                         )
                     else:
                         rag_prompt = build_rag_prompt(
-                            user_input,
+                            processed_input,
                             retrieved_texts,
                             contains_therapy=contains_therapy
                         )
-                        response = chatbot(rag_prompt)[0]["generated_text"]
+                        raw_response = chatbot(rag_prompt)[0]["generated_text"]
+                        response = obscure_pii(raw_response)
 
-                        query_is_therapy = is_therapy_related(user_input)
+                        query_is_therapy = is_therapy_related(processed_input)
 
                         # --- Logica più intelligente: ---
                         #  - Se la domanda riguarda una terapia
