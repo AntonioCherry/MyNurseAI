@@ -9,11 +9,9 @@ from app.models.user import User
 from app.security_components.check_therapy import is_therapy_related
 from app.security_components.PII_obfuscation import obscure_pii
 from app.security_components.prompt_sanitizer import sanitize_user_prompt
-from app.security_components.verify_hallucination import verify_response_with_llm
 
 
 # --- Wrapper Ollama ---
-# --- Utilizzato per impacchettare le richieste indirizzate ad ollama ---
 class OllamaWrapper:
     def __init__(self, model_name):
         self.model_name = model_name
@@ -29,13 +27,12 @@ class OllamaWrapper:
     def reset(self):
         pass
 
-# --- Caricamento dell'LLM ---
+
 @st.cache_resource
 def load_model():
     return OllamaWrapper(model_name="mistral")
 
-# --- Funzione che sulla base dell'email dell'utente reperisce tutte le info in formato vettoriale
-# --- dalla rispetiva cartella di chromaDB
+
 def load_vectorstore(email_paziente):
     persist_dir = os.path.join("chroma_db", email_paziente)
     if not os.path.exists(persist_dir):
@@ -52,24 +49,14 @@ def load_vectorstore(email_paziente):
     return vectorstore
 
 
-# --- Funzione che restituisce tutti i pazienti di un determinato medico ---
 def get_pazienti_del_medico(email_medico: str, db: Session):
     return db.query(User).filter(User.medicoAssociato == email_medico).all()
 
 
-def build_rag_prompt(query, retrieved_docs, paziente_nome=None, contains_therapy: bool = False):
-    """
-    Costruisce il prompt RAG.
-    - query: testo della domanda
-    - retrieved_docs: lista di stringhe recuperate dal retriever
-    - paziente_nome: (opzionale) nome del paziente per contesto
-    - contains_therapy: True se il contesto contiene informazioni terapeutiche
-    """
+def build_rag_prompt(query, retrieved_docs, pazienti_coinvolti=None, contains_therapy: bool = False):
     context = "\n\n".join(retrieved_docs) if retrieved_docs else "(Nessun documento rilevante trovato.)"
-    patient_info = f"\nIl paziente in questione è {paziente_nome}." if paziente_nome else ""
+    patient_info = f"\nPazienti coinvolti: {pazienti_coinvolti}." if pazienti_coinvolti else ""
 
-    # Istruzione specifica riguardo la terapia: vincola il modello a non inventare terapie,
-    # ma a rispondere solo sulla base delle terapie prescritte dal medico a cui quel paziente fa riferimento.
     if contains_therapy:
         therapy_instruction = (
             "Nei documenti forniti ci sono informazioni su terapie o trattamenti. "
@@ -105,41 +92,58 @@ Risposta:
 """
     return prompt
 
-def identify_paziente_in_query(query, pazienti):
-    """
-    Cerca di capire da una domanda a quale paziente si riferisce il medico.
-    Restituisce l'oggetto Paziente più simile o None se non riconosciuto.
-    """
+
+def identify_multiple_pazienti_in_query(query, pazienti):
     query_lower = query.lower()
-    nomi_possibili = {f"{p.nome.lower()} {p.cognome.lower()}": p for p in pazienti}
+    found = []
 
-    # Cerca match esatto
-    for full_name, paziente in nomi_possibili.items():
-        if full_name in query_lower:
-            return paziente
+    for p in pazienti:
+        fullname = f"{p.nome.lower()} {p.cognome.lower()}"
+        if fullname in query_lower:
+            found.append(p)
 
-    # Se non c'è match esatto, prova fuzzy matching
-    match = difflib.get_close_matches(query_lower, nomi_possibili.keys(), n=1, cutoff=0.6)
-    if match:
-        return nomi_possibili[match[0]]
-    return None
+    # Fuzzy search aggiuntiva
+    if not found:
+        names = [f"{p.nome.lower()} {p.cognome.lower()}" for p in pazienti]
+        match = difflib.get_close_matches(query_lower, names, n=2, cutoff=0.6)
+        for m in match:
+            for p in pazienti:
+                if f"{p.nome.lower()} {p.cognome.lower()}" == m:
+                    found.append(p)
+
+    return list(set(found))
 
 
-def ask_chatbot(db,user):
+def extract_clinical_event(query: str):
+    """
+    Estrae le keyword cliniche principali dalla query, invece di tutta la frase.
+    Restituisce una lista di keyword o eventi clinici.
+    """
+    q = query.lower()
+    keywords = ["visita", "controllo", "referto", "esame", "ecografia", "analisi", "terapia", "farmacologica", "farmaco"]
+
+    events = []
+    for word in keywords:
+        if word in q:
+            events.append(word)
+    return events if events else None
+
+
+
+def ask_chatbot(db, user):
     sidebar(user)
 
     st.title("💬 Chat con il tuo infermiere virtuale")
 
     chatbot = load_model()
-    hallucination_checker = load_model()
 
-    # Se medico, carica tutti i suoi pazienti
     if user.role == "Medico":
         pazienti = get_pazienti_del_medico(user.email, db)
+        for p in pazienti:
+            print(f" - {p.nome} {p.cognome} ({p.email})")
     else:
         pazienti = [user]
 
-    # Memoria chat
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
@@ -159,77 +163,88 @@ def ask_chatbot(db,user):
         processed_input = obscure_pii(user_input)
         sanitized_input = sanitize_user_prompt(processed_input)
 
-        if sanitized_input is "error":
-            st.warning("⚠️ Il messaggio contiene istruzioni non consentite o sospette. Riformula la domanda.")
-            return
+        if user.role == "Paziente":
+            if sanitized_input == "error":
+                st.session_state.chat_history.append(("user", user_input))
+                response = "⚠️ Il messaggio contiene istruzioni non consentite o sospette. Riformula la domanda."
+                st.session_state.chat_history.append(("bot", response))
+                return
+
+        if sanitized_input == "warning":
+            st.warning("⚠️ Il messaggio potrebbe contenere contenuti sospetti. Procedi con cautela.")
+
+        # continua con la generazione della risposta usando sanitized_input
         st.session_state.chat_history.append(("user", processed_input))
 
         with st.spinner("L'infermiere sta cercando nei documenti..."):
             response = None
 
-            # --- Se medico ---
             if user.role == "Medico":
-                #1. Cerca di identificare il paziente nella query al chatbot.
-                selected_paziente = identify_paziente_in_query(sanitized_input, pazienti)
-                #1.1. Se  non trova nessun riferimento a pazienti di quel medico allora restituisce errore.
-                if not selected_paziente:
+                selected_pazienti = identify_multiple_pazienti_in_query(processed_input, pazienti)
+
+                if not selected_pazienti:
                     response = (
-                        "Non ho trovato riferimenti chiari a un paziente tra i tuoi assistiti. "
-                        "Puoi ripetere la domanda specificando il nome completo del paziente?"
+                        "Non ho trovato riferimenti chiari a pazienti tra i tuoi assistiti. "
+                        "Specificami il nome completo del paziente o dei pazienti a cui ti riferisci."
                     )
-                else:
-                    #2. Tramite l'email del paziente viene caricato il vector store di quel paziente specifico.
-                    paziente_email = selected_paziente.email
-                    vectorstore = load_vectorstore(paziente_email)
-                    if vectorstore is None:
+                    st.session_state.chat_history.append(("bot", response))
+                    return
+
+                all_docs = []
+                pazienti_con_vectorstore = []
+
+                for p in selected_pazienti:
+                    vs = load_vectorstore(p.email)
+                    if vs is None:
+                        continue
+
+                    pazienti_con_vectorstore.append(p)
+                    retriever = vs.as_retriever(search_kwargs={"k": 3})
+                    docs = retriever.get_relevant_documents(sanitized_input)
+                    all_docs.extend(docs)
+
+                if not pazienti_con_vectorstore:
+                    response = "Non ho trovato documenti clinici per nessuno dei pazienti menzionati."
+                    st.session_state.chat_history.append(("bot", response))
+                    return
+
+                retrieved_texts = [d.page_content for d in all_docs]
+                context = "\n\n".join(retrieved_texts)
+
+                contains_therapy = is_therapy_related(context)
+
+                event_requested = extract_clinical_event(processed_input)
+
+                if event_requested:
+                    found_in_context = any(any(ev in doc.lower() for ev in event_requested) for doc in retrieved_texts)
+
+                    if not found_in_context:
                         response = (
-                            f"Non ho trovato documenti clinici per "
-                            f"{selected_paziente.nome} {selected_paziente.cognome}."
+                            f"📄 Nei documenti disponibili non risultano informazioni relative a '{event_requested}'. "
+                            "Non posso fornirti dettagli su questo evento clinico."
                         )
-                    else:
-                        #3. Vengono estratti dal vector store di quel paziente i k=3 documenti più pertinenti
-                        #   I documenti poi verranno utilizzati per costruire il contesto su cui si baserà
-                        #   il chatbot per generare una risposta.
-                        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-                        docs = retriever.get_relevant_documents(sanitized_input)
-                        retrieved_texts = [d.page_content for d in docs]
-                        context = "\n\n".join(retrieved_texts)
+                        st.session_state.chat_history.append(("bot", response))
+                        st.rerun()
+                        return
 
-                        # --- Controllo terapeutico ---
-                        contains_therapy = is_therapy_related(context)
-                        #4. Costruzione del prompt sulla base del contesto recuperato dal vector store.
-                        rag_prompt = build_rag_prompt(
-                            processed_input,
-                            retrieved_texts,
-                            paziente_nome=f"{selected_paziente.nome} {selected_paziente.cognome}",
-                            contains_therapy= contains_therapy
-                        )
+                pazienti_nomi = ", ".join([f"{p.nome} {p.cognome}" for p in pazienti_con_vectorstore])
+                rag_prompt = build_rag_prompt(processed_input, retrieved_texts, pazienti_coinvolti=pazienti_nomi, contains_therapy=contains_therapy)
 
+                raw_response = chatbot(rag_prompt)[0]["generated_text"]
+                response = obscure_pii(raw_response)
 
+                query_is_therapy = is_therapy_related(sanitized_input)
 
+                if query_is_therapy and not contains_therapy:
+                    response = (
+                        "⚠️ Nei documenti recuperati non sono presenti indicazioni terapeutiche. "
+                        "Posso fornirti solo informazioni cliniche generali, non terapie."
+                    )
 
-                        response = "Il cane è il miglior amico dell'uomo"
-                        is_supported, verification_feedback = verify_response_with_llm(response, retrieved_texts,
-                                                                                    hallucination_checker)
-                        if not is_supported:
-                            st.warning("ciao")
-                        #6. --- Controllo se l'input dell'utente riguarda una terapia ---
-                        query_is_therapy = is_therapy_related(sanitized_input)
-
-                        #7. Se nella query utente è presente un riferimento a terapie o farmaci e
-                        #   nel contesto recuperato non ci sono riferimenti a tali terapie e farmaci allora da errore
-                        if query_is_therapy and not contains_therapy:
-                            response = (
-                                "⚠️ Nei documenti consultati non sono presenti indicazioni terapeutiche. "
-                                "Posso riportare solo informazioni cliniche generali relative al caso, "
-                                "ma non dettagli su trattamenti o farmaci."
-                            )
-
-
-            # --- Se paziente ---
-            else:
+            else:  # Se paziente
                 paziente_email = user.email
                 vectorstore = load_vectorstore(paziente_email)
+
                 if vectorstore is None:
                     response = "Non ho trovato informazioni nei tuoi documenti."
                 else:
@@ -237,30 +252,27 @@ def ask_chatbot(db,user):
                     docs = retriever.get_relevant_documents(processed_input)
                     retrieved_texts = [d.page_content for d in docs]
                     context = "\n\n".join(retrieved_texts)
-
-
                     contains_therapy = is_therapy_related(context)
 
+                    event_requested = extract_clinical_event(processed_input)
+                    if event_requested:
+                        found_in_context = any(event in doc.lower() for event in event_requested for doc in retrieved_texts)
+                        if not found_in_context:
+                            response = (
+                                f"📄 Nei documenti presenti non risultano informazioni relative a '{event_requested}'. "
+                                "Non posso fornirti dettagli su questo evento clinico."
+                            )
+                            st.session_state.chat_history.append(("bot", response))
+                            st.rerun()
+                            return
+
                     if not retrieved_texts:
-                        response = (
-                            "Non ho trovato informazioni utili nei tuoi documenti "
-                            "per rispondere alla domanda."
-                        )
+                        response = "Non ho trovato informazioni utili nei tuoi documenti per rispondere alla domanda."
                     else:
-                        rag_prompt = build_rag_prompt(
-                            processed_input,
-                            retrieved_texts,
-                            contains_therapy=contains_therapy
-                        )
+                        rag_prompt = build_rag_prompt(processed_input, retrieved_texts, contains_therapy=contains_therapy)
                         raw_response = chatbot(rag_prompt)[0]["generated_text"]
                         response = obscure_pii(raw_response)
-
                         query_is_therapy = is_therapy_related(processed_input)
-
-                        # --- Logica più intelligente: ---
-                        #  - Se la domanda riguarda una terapia
-                        #  - ma nei documenti non ci sono riferimenti terapeutici
-                        #  -> Mostra messaggio di avviso
                         if query_is_therapy and not contains_therapy:
                             response = (
                                 "⚠️ Nei documenti consultati non sono presenti indicazioni terapeutiche. "

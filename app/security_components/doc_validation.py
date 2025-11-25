@@ -1,35 +1,33 @@
 import re
-import math
+import math, json
 import io
 import subprocess
 from PyPDF2 import PdfReader
+from typing import Tuple, List
 from statistics import mean
+def chunk_text(text: str, max_chunk_length: int = 1500) -> List[str]:
+    """Divide il testo in chunk di lunghezza max_chunk_length (in parole)"""
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), max_chunk_length):
+        chunk = " ".join(words[i:i+max_chunk_length])
+        chunks.append(chunk)
+    return chunks
 
-def classify_with_ollama(text: str) -> tuple[bool, str, float]:
-    """
-    Usa Ollama (modello Mistral) per determinare se il testo è medico o non medico.
-    Restituisce (is_medical, label, confidence)
-    """
+def classify_chunk_with_ollama(text_chunk: str) -> Tuple[bool, str, float, str]:
+    """Classifica un singolo chunk usando Ollama/Mistral e JSON output"""
     prompt = f"""
-    Sei un classificatore di documenti clinici.
-    Determina se il seguente testo è un **documento medico o sanitario** (es. referto, prescrizione, anamnesi, visita, diagnosi).
+Sei un classificatore di documenti clinici. Determina se il testo è MEDICO o NON_MEDICO.
+Classifica come MEDICO solo se il documento ha scopo clinico principale.
+ Non classificare come MEDICO documenti su altri argomenti che usano scenari medici come esempio oppure che fanno
+ riferimento a termini medico-sanitari solo in alcune porzioni del documento.
+Rispondi SOLO in JSON valido:
+{{"label":"MEDICO" o "NON_MEDICO", "confidence":0-1, "reason":"spiegazione breve"}}
 
-    Classifica come:
-    - "MEDICO" se contiene dati clinici, sintomi, diagnosi, terapie, esami o indicazioni sanitarie.
-    - "NON_MEDICO" se è un testo amministrativo, tecnico, o non sanitario.
-
-    Esempi:
-    1. "Referto clinico — visita cardiologica con ECG e prescrizione." → MEDICO
-    2. "Modulo di consenso informato." → MEDICO
-    3. "Curriculum del medico o documento legale." → NON_MEDICO
-    4. "Articolo informativo sulla salute." → NON_MEDICO
-
-    Testo:
-    {text[:2000]}
-    """
-
+Testo:
+{text_chunk}
+"""
     try:
-        # ✅ Specifica il modello
         result = subprocess.run(
             ["ollama", "run", "mistral"],
             input=prompt.encode("utf-8"),
@@ -42,28 +40,67 @@ def classify_with_ollama(text: str) -> tuple[bool, str, float]:
 
         raw_output = result.stdout.decode().strip()
 
-        # 🪶 DEBUG: stampa output grezzo e interpretazione
-        print("\n--- DEBUG CLASSIFICATORE ---")
-        print("Output grezzo da Ollama:")
+        # Stampa output grezzo
+        print("--- DEBUG CHUNK ---")
         print(raw_output)
-        print("-----------------------------")
+        print("-------------------")
 
-        low = raw_output.lower()
+        # parsing JSON
+        parsed = None
+        try:
+            parsed = json.loads(raw_output)
+            if isinstance(parsed, list) and len(parsed) > 0:
+                parsed = parsed[0]
+        except Exception:
+            m = re.search(r"\{.*\}", raw_output, flags=re.DOTALL)
+            if m:
+                parsed = json.loads(m.group(0))
 
-        # Analizza risposta
-        if "medico" in low and not re.search(r"\bnon[- ]?medico\b", low):
-            print("→ Classificato come: MEDICO ✅")
-            return True, "medico", 0.9
-        elif re.search(r"\bnon[- ]?medico\b", low):
-            print("→ Classificato come: NON_MEDICO ❌")
-            return False, "non medico", 0.9
+        if parsed is None:
+            return False, "non medico", 0.0, "Parsing JSON fallito"
+
+        label = str(parsed.get("label", "")).upper()
+        confidence = float(parsed.get("confidence", 0.5))
+        reason = parsed.get("reason", "")
+
+        print(f"Chunk classificato come {label} con confidence {confidence:.2f}, reason: {reason}")
+
+        if label == "MEDICO":
+            return True, "medico", confidence, reason
         else:
-            print("→ Classificazione incerta ⚠️:", raw_output)
-            return False, raw_output, 0.5
+            return False, "non medico", confidence, reason
 
     except Exception as e:
-        print("⚠️ Errore nel classificatore:", e)
-        return False, f"Errore Ollama: {e}", 0.0
+        print("⚠️ Errore classificazione chunk:", e)
+        return False, "errore Ollama", 0.0, str(e)
+
+def classify_with_chunks(text: str, chunk_size: int = 1500) -> Tuple[bool, str, float]:
+    """
+    Classifica un documento lungo suddividendolo in chunk.
+    Ritorna la classificazione finale basata su majority voting.
+    """
+    chunks = chunk_text(text, max_chunk_length=chunk_size)
+    results = []
+
+    print(f"\nDocumento diviso in {len(chunks)} chunk")
+
+    for i, chunk in enumerate(chunks, start=1):
+        print(f"\n=== Chunk {i} ===")
+        is_medical, label, confidence, reason = classify_chunk_with_ollama(chunk)
+        results.append((is_medical, label, confidence, reason))
+
+    # majority voting sulle etichette
+    medico_count = sum(1 for r in results if r[0])
+    non_medico_count = len(results) - medico_count
+
+    if medico_count >= non_medico_count:
+        conf = sum(r[2] for r in results if r[0]) / max(medico_count, 1)
+        print(f"\n=== DOCUMENTO FINALE ===\nClassificato come MEDICO, confidence media: {conf:.2f}")
+        return True, "medico", conf
+    else:
+        conf = sum(r[2] for r in results if not r[0]) / max(non_medico_count, 1)
+        print(f"\n=== DOCUMENTO FINALE ===\nClassificato come NON_MEDICO, confidence media: {conf:.2f}")
+        return False, "non medico", conf
 
 
 
@@ -111,7 +148,7 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
 
     # --- controllo base sulla lunghezza ---
     if len(text.strip()) < 300:
-        errors.append("Documento troppo breve o privo di testo leggibile.")
+        errors.append("Documento troppo breve o privo di testo leggibile.\n")
         suspicion_score += 0.6
 
     # --- controllo struttura ---
@@ -134,7 +171,7 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
             base64_flag = True
             break
     if base64_flag:
-        errors.append("Pattern compatibile con Base64 o testo codificato rilevato.")
+        errors.append("Pattern compatibile con Base64 o testo codificato rilevato.\n")
         suspicion_score += 1.0
 
     # --- entropia ---
@@ -147,7 +184,7 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
         avg_entropy = entropy_total = 0
 
     if avg_entropy > 5.5 or entropy_total > 5.5:
-        errors.append("Entropia elevata: possibile testo codificato o anomalo.")
+        errors.append("Entropia elevata: possibile testo codificato o anomalo.\n")
         suspicion_score += 1.0
 
     # --- rilevamento linee di codice ---
@@ -178,7 +215,7 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
 
     # aumenta la soglia per ridurre falsi positivi
     if code_like_lines > 15:
-        errors.append(f"Rilevate {code_like_lines} righe con pattern simili a codice.")
+        errors.append(f"Rilevate {code_like_lines} righe con pattern simili a codice.\n")
         suspicion_score += 0.5
 
     # --- ricerca parole chiave malevole (token-based) ---
@@ -197,18 +234,18 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
                 found_keywords.append(kw)
 
     if found_keywords:
-        errors.append(f"Parole chiave potenzialmente malevole rilevate: {', '.join(found_keywords)}")
+        errors.append(f"Parole chiave potenzialmente malevole rilevate: {', '.join(found_keywords)}\n")
         suspicion_score += 1.2
 
     # --- controllo LLM ---
     if suspicion_score < 1.6:
-        valid, label, conf = classify_with_ollama(text)
+        valid, label, conf = classify_with_chunks(text)
         if not valid:
             errors.append("Il documento non appare medico.")
             suspicion_score += 0.6
     else:
         try:
-            valid, label, conf = classify_with_ollama(text)
+            valid, label, conf = classify_with_chunks(text)
             if not valid:
                 errors.append("Il documento non appare medico.")
                 suspicion_score += 0.4
