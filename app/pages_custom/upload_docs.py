@@ -63,11 +63,11 @@ def upload_docs(db, user):
                 valid, message = validate_pdf_content(file_bytes)
 
                 if not valid:
-                    st.error(f"❌ Upload rifiutato: {message}")
+                    st.error(f"Upload rifiutato: {message}")
                     # rimuovi il lock e non impostare flag permanente
                     st.session_state[processing_key] = False
                 else:
-                    # 1️⃣ Salva su PostgreSQL
+                    #Salva su PostgreSQL
                     new_doc = Doc(
                         filename=uploaded_file.name,
                         paziente_email=p.email,
@@ -77,7 +77,7 @@ def upload_docs(db, user):
                     db.commit()
                     st.success(f"Documento '{uploaded_file.name}' caricato con successo!")
 
-                    # 2️⃣ Salva su ChromaDB
+                    #Salva su ChromaDB
                     try:
                         reader = PdfReader(io.BytesIO(file_bytes))
                         text = "".join([page.extract_text() or "" for page in reader.pages])

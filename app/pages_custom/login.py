@@ -39,7 +39,7 @@ def login_page(db):
 
     st.title("MyNurseAI - Login")
     # --- Form di login ---
-    st.subheader("🔐 Login")
+    st.subheader("Login")
     with st.form("login_form"):
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")

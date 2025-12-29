@@ -8,7 +8,10 @@ anonymizer = AnonymizerEngine()
 # --- Riconoscitori custom ---
 
 # Codice Fiscale (Italia)
-cf_pattern = Pattern("CodiceFiscale", r"\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b", 0.8)
+cf_pattern = Pattern(
+    "CodiceFiscale",
+    r"\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b",
+    0.8)
 cf_recognizer = PatternRecognizer(supported_entity="IT_TAX_CODE", patterns=[cf_pattern])
 
 # Carta di credito

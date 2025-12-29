@@ -6,7 +6,7 @@ from app.services.auth_service import hash_password
 
 def register_page(db):
     st.title("MyNurseAI - Registrazione")
-    st.subheader("🧾 Crea un account")
+    st.subheader("Crea un account")
 
     ruoli_disponibili = ["Medico", "Paziente"]
 
@@ -27,21 +27,21 @@ def register_page(db):
     # --- Campo Medico associato se Paziente ---
     medico_associato = None
     if ruolo == "Paziente":
-        medico_associato = st.text_input("📧 Email del medico associato")
+        medico_associato = st.text_input("Email del medico associato")
 
     # --- Form di registrazione ---
     with st.form("register_form"):
-        username = st.text_input("👤 Username")
-        email = st.text_input("📧 Email")
-        password = st.text_input("🔒 Password", type="password")
+        username = st.text_input("Username")
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
 
-        st.markdown("### 📍 Dati personali")
+        st.markdown("### Dati personali")
         via = st.text_input("Via")
         numero_civico = st.number_input("Numero civico", min_value=0, step=1, format="%d")
         citta = st.text_input("Città")
         cap_num = st.number_input("CAP (5 cifre)", min_value=0, max_value=99999, step=1, format="%d")
 
-        st.markdown("### 🎂 Altri dati")
+        st.markdown("### Altri dati")
         nome = st.text_input("Nome")
         cognome = st.text_input("Cognome")
         oggi = datetime.date.today()

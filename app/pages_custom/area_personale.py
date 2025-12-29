@@ -1,7 +1,4 @@
 import streamlit as st
-import time
-import os
-
 from app.components.sidebar import sidebar
 from app.pages_custom.show_pazienti import show_pazienti
 

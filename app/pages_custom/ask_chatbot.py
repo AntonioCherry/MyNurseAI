@@ -71,24 +71,24 @@ def build_rag_prompt(query, retrieved_docs, pazienti_coinvolti=None, contains_th
         )
 
     prompt = f"""
-Sei un infermiere virtuale che assiste un medico. Rispondi in modo chiaro, professionale e conservativo.
-{patient_info}
-
-{therapy_instruction}
-
-Contesto (da usare esclusivamente per rispondere; non aggiungere informazioni esterne):
-{context}
-
-Domanda del medico/paziente:
-{query}
-
-Istruzioni di formato:
-- Rispondi solo con informazioni presenti nel contesto.
-- Se non trovi informazioni pertinenti, rispondi esplicitando che nei documenti non sono presenti dati utili.
-- Non includere consigli farmacologici o terapie se non esplicitamente presenti nei documenti.
-- Se citi parti dei documenti, indica brevemente la loro fonte (es. "Da referto del DD/MM/YYYY").
-
-Risposta:
+            Sei un infermiere virtuale che assiste un medico. Rispondi in modo chiaro, professionale e conservativo.
+            {patient_info}
+            
+            {therapy_instruction}
+            
+            Contesto (da usare esclusivamente per rispondere; non aggiungere informazioni esterne):
+            {context}
+            
+            Domanda del medico/paziente:
+            {query}
+            
+            Istruzioni di formato:
+            - Rispondi solo con informazioni presenti nel contesto.
+            - Se non trovi informazioni pertinenti, rispondi esplicitando che nei documenti non sono presenti dati utili.
+            - Non includere consigli farmacologici o terapie se non esplicitamente presenti nei documenti.
+            - Se citi parti dei documenti, indica brevemente la loro fonte (es. "Da referto del DD/MM/YYYY").
+            
+            Risposta:
 """
     return prompt
 
@@ -139,8 +139,6 @@ def ask_chatbot(db, user):
 
     if user.role == "Medico":
         pazienti = get_pazienti_del_medico(user.email, db)
-        for p in pazienti:
-            print(f" - {p.nome} {p.cognome} ({p.email})")
     else:
         pazienti = [user]
 
@@ -228,7 +226,10 @@ def ask_chatbot(db, user):
                         return
 
                 pazienti_nomi = ", ".join([f"{p.nome} {p.cognome}" for p in pazienti_con_vectorstore])
-                rag_prompt = build_rag_prompt(processed_input, retrieved_texts, pazienti_coinvolti=pazienti_nomi, contains_therapy=contains_therapy)
+                rag_prompt = build_rag_prompt(processed_input,
+                                              retrieved_texts,
+                                              pazienti_coinvolti=pazienti_nomi,
+                                              contains_therapy=contains_therapy)
 
                 raw_response = chatbot(rag_prompt)[0]["generated_text"]
                 response = obscure_pii(raw_response)

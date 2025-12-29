@@ -5,6 +5,7 @@ import subprocess
 from PyPDF2 import PdfReader
 from typing import Tuple, List
 from statistics import mean
+
 def chunk_text(text: str, max_chunk_length: int = 1500) -> List[str]:
     """Divide il testo in chunk di lunghezza max_chunk_length (in parole)"""
     words = text.split()
@@ -17,19 +18,19 @@ def chunk_text(text: str, max_chunk_length: int = 1500) -> List[str]:
 def classify_chunk_with_ollama(text_chunk: str) -> Tuple[bool, str, float, str]:
     """Classifica un singolo chunk usando Ollama/Mistral e JSON output"""
     prompt = f"""
-Sei un classificatore di documenti clinici. Determina se il testo è MEDICO o NON_MEDICO.
-Classifica come MEDICO solo se il documento ha scopo clinico principale.
- Non classificare come MEDICO documenti su altri argomenti che usano scenari medici come esempio oppure che fanno
- riferimento a termini medico-sanitari solo in alcune porzioni del documento.
-Rispondi SOLO in JSON valido:
-{{"label":"MEDICO" o "NON_MEDICO", "confidence":0-1, "reason":"spiegazione breve"}}
-
-Testo:
-{text_chunk}
-"""
+        Sei un classificatore di documenti clinici. Determina se il testo è MEDICO o NON_MEDICO.
+        Classifica come MEDICO solo se il documento ha scopo clinico principale.
+         Non classificare come MEDICO documenti su altri argomenti che usano scenari medici come esempio oppure che fanno
+         riferimento a termini medico-sanitari solo in alcune porzioni del documento.
+        Rispondi SOLO in JSON valido:
+        {{"label":"MEDICO" o "NON_MEDICO", "confidence":0-1, "reason":"spiegazione breve"}}
+        
+        Testo:
+        {text_chunk}
+        """
     try:
         result = subprocess.run(
-            ["ollama", "run", "mistral"],
+            ["ollama", "run", "medllama2"],
             input=prompt.encode("utf-8"),
             capture_output=True,
             timeout=60
@@ -39,11 +40,6 @@ Testo:
             raise RuntimeError(result.stderr.decode())
 
         raw_output = result.stdout.decode().strip()
-
-        # Stampa output grezzo
-        print("--- DEBUG CHUNK ---")
-        print(raw_output)
-        print("-------------------")
 
         # parsing JSON
         parsed = None
@@ -102,8 +98,6 @@ def classify_with_chunks(text: str, chunk_size: int = 1500) -> Tuple[bool, str, 
         print(f"\n=== DOCUMENTO FINALE ===\nClassificato come NON_MEDICO, confidence media: {conf:.2f}")
         return False, "non medico", conf
 
-
-
 def shannon_entropy(s: str) -> float:
     """Calcola entropia per identificare testo codificato o nascosto."""
     if not s:
@@ -144,7 +138,6 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
     reader = PdfReader(io.BytesIO(pdf_bytes))
     pages_texts = [page.extract_text() or "" for page in reader.pages]
     text = "\n".join(pages_texts)
-    low_text = text.lower()
 
     # --- controllo base sulla lunghezza ---
     if len(text.strip()) < 300:
@@ -158,8 +151,6 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
         suspicion_score += 0.9
 
     # --- normalizzazione ---
-    compact = re.sub(r"\s+", "", text)
-    compact_lower = compact.lower()
     alnum = re.sub(r"[^A-Za-z0-9+/=]", "", text)
 
     # --- rilevamento Base64 ---
@@ -202,7 +193,7 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
 
         # ignora linee tipiche dei referti (es. valori, unità di misura)
         if re.search(
-                r"\b(g\/dl|mmol\/l|mg\/dl|u\/l|creatinina|emoglobina|globuli|bilirubina|sodio|potassio|esame|referto|diagnosi)\b",
+                r"\b(g\/dl|mmol\/l|mg\/dl|u\/l||valori|esame|referto|diagnosi|terapia|farmacologica|farmaco|controllo)\b",
                 line_stripped, re.IGNORECASE):
             continue
 
@@ -217,25 +208,6 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
     if code_like_lines > 15:
         errors.append(f"Rilevate {code_like_lines} righe con pattern simili a codice.\n")
         suspicion_score += 0.5
-
-    # --- ricerca parole chiave malevole (token-based) ---
-    clean_for_tokens = re.sub(r"[^a-z0-9\s]", " ", low_text)
-    tokens = clean_for_tokens.split()
-    keywords = {
-        "ignorepreviousinstructions", "ignoreprevious", "ignoreinstructions",
-        "youarenow", "actas", "jailbreak", "dan", "systemprompt",
-        "openaiapikey", "openai.api_key", "openai", "grantaccess"
-    }
-    found_keywords = [kw for kw in keywords if kw in tokens]
-
-    for kw in keywords:
-        if re.search(r"\b" + re.escape(kw) + r"\b", compact_lower):
-            if kw not in found_keywords:
-                found_keywords.append(kw)
-
-    if found_keywords:
-        errors.append(f"Parole chiave potenzialmente malevole rilevate: {', '.join(found_keywords)}\n")
-        suspicion_score += 1.2
 
     # --- controllo LLM ---
     if suspicion_score < 1.6:
@@ -256,3 +228,4 @@ def validate_pdf_content(pdf_bytes: bytes) -> tuple[bool, str]:
     if suspicion_score >= SCORE_THRESHOLD or errors:
         return False, "; ".join(errors) if errors else "Documento sospetto."
     return True, ""
+
